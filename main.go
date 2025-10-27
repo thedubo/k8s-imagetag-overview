@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -40,17 +40,9 @@ type WebServer struct {
 	rateLimiter *RateLimiter
 }
 
-// HTMLTemplateData holds data for HTML template
-type HTMLTemplateData struct {
-	Namespace   string
-	Deployments map[string]DeploymentVersion
-	Error       string
-}
-
 // HTTP Content-Type constants
 const (
 	contentTypeJSON   = "application/json"
-	contentTypeHTML   = "text/html"
 	contentTypeYAML   = "text/plain"
 	headerContentType = "Content-Type"
 )
@@ -65,6 +57,14 @@ const (
 	maxRequestsPerIP = 60
 	rateLimitWindow  = time.Minute
 )
+
+// getEnvWithDefault returns the value of the environment variable or a default value if not set
+func getEnvWithDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
 
 // RateLimiter holds rate limiting data
 type RateLimiter struct {
@@ -164,190 +164,6 @@ func getClientIP(r *http.Request) string {
 	return ip
 }
 
-const htmlTemplate = `
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Kubernetes Version Monitor</title>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            margin: 0;
-            padding: 20px;
-            background-color: #f5f5f5;
-        }
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            background: white;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }
-        h1 {
-            color: #333;
-            text-align: center;
-            margin-bottom: 30px;
-        }
-        .namespace-info {
-            background: #e8f4fd;
-            padding: 15px;
-            border-radius: 5px;
-            margin-bottom: 20px;
-            text-align: center;
-        }
-        .deployment {
-            margin-bottom: 20px;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-            overflow: hidden;
-        }
-        .deployment-header {
-            background: #326ce5;
-            color: white;
-            padding: 15px;
-            font-weight: bold;
-            font-size: 16px;
-        }
-        .images {
-            padding: 15px;
-        }
-        .image-row {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 8px 0;
-            border-bottom: 1px solid #eee;
-        }
-        .image-row:last-child {
-            border-bottom: none;
-        }
-        .image-name {
-            font-weight: 500;
-            color: #555;
-        }
-        .image-version {
-            font-family: 'Monaco', 'Menlo', monospace;
-            background: #f8f9fa;
-            padding: 4px 8px;
-            border-radius: 3px;
-            color: #d73a49;
-            font-size: 14px;
-        }
-        .error {
-            background: #f8d7da;
-            color: #721c24;
-            padding: 15px;
-            border-radius: 5px;
-            margin-bottom: 20px;
-        }
-        .format-links {
-            text-align: center;
-            margin-bottom: 20px;
-        }
-        .format-links a {
-            margin: 0 10px;
-            padding: 8px 16px;
-            text-decoration: none;
-            background: #6c757d;
-            color: white;
-            border-radius: 4px;
-            font-size: 14px;
-        }
-        .format-links a:hover {
-            background: #545b62;
-        }
-        .no-deployments {
-            text-align: center;
-            color: #666;
-            padding: 40px;
-            font-style: italic;
-        }
-        .namespace-form {
-            text-align: center;
-            margin-bottom: 20px;
-            padding: 20px;
-            background: #f8f9fa;
-            border-radius: 5px;
-        }
-        .namespace-form input {
-            padding: 8px 12px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            margin-right: 10px;
-            font-size: 14px;
-            width: 200px;
-        }
-        .namespace-form button {
-            padding: 8px 16px;
-            background: #007bff;
-            color: white;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 14px;
-        }
-        .namespace-form button:hover {
-            background: #0056b3;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🚀 Kubernetes Version Monitor</h1>
-        
-        <div class="namespace-form">
-            <form method="GET">
-                <input type="text" name="namespace" placeholder="Enter namespace..." value="{{.Namespace | html}}" />
-                <button type="submit">Monitor Namespace</button>
-            </form>
-        </div>
-        
-        {{if .Error}}
-        <div class="error">
-            <strong>Error:</strong> {{.Error | html}}
-        </div>
-        {{else}}
-        <div class="namespace-info">
-            <strong>Namespace:</strong> {{.Namespace | html}}
-        </div>
-        
-        <div class="format-links">
-            <a href="?namespace={{.Namespace | urlquery}}&format=html">HTML View</a>
-            <a href="?namespace={{.Namespace | urlquery}}&format=json">JSON (Default)</a>
-            <a href="?namespace={{.Namespace | urlquery}}&format=yaml">YAML</a>
-            <a href="?namespace={{.Namespace | urlquery}}">Refresh</a>
-        </div>
-        
-        {{if .Deployments}}
-        {{range $deploymentName, $deployment := .Deployments}}
-        <div class="deployment">
-            <div class="deployment-header">
-                📦 {{$deploymentName | html}}
-            </div>
-            <div class="images">
-                {{range $containerName, $version := $deployment.Images}}
-                <div class="image-row">
-                    <span class="image-name">{{$containerName | html}}</span>
-                    <span class="image-version">{{$version | html}}</span>
-                </div>
-                {{end}}
-            </div>
-        </div>
-        {{end}}
-        {{else}}
-        <div class="no-deployments">
-            No deployments found in this namespace.
-        </div>
-        {{end}}
-        {{end}}
-    </div>
-</body>
-</html>
-`
-
 func main() {
 	// Create Kubernetes client
 	clientset, err := createKubernetesClient("")
@@ -357,7 +173,7 @@ func main() {
 
 	server := &WebServer{
 		clientset:   clientset,
-		port:        "3304",
+		port:        getEnvWithDefault("VERSIONAPP_PORT", "3304"),
 		rateLimiter: NewRateLimiter(),
 	}
 
@@ -365,9 +181,10 @@ func main() {
 	http.HandleFunc("/", server.handleRoot)
 	http.HandleFunc("/health", server.handleHealth)
 
+	defaultNamespace := getEnvWithDefault("VERSIONAPP_NAMESPACE", "default")
 	log.Printf("Starting Kubernetes Version Monitor web server on port %s", server.port)
 	log.Printf("Open http://localhost:%s in your browser", server.port)
-	log.Printf("Add ?namespace=your-namespace to monitor specific namespaces")
+	log.Printf("Monitoring namespace: %s (set via VERSIONAPP_NAMESPACE or defaults to 'default')", defaultNamespace)
 	log.Fatal(http.ListenAndServe(":"+server.port, nil))
 }
 
@@ -388,22 +205,11 @@ func (ws *WebServer) handleRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	namespace := r.URL.Query().Get("namespace")
-	if namespace == "" {
-		namespace = "default"
-	}
+	namespace := getEnvWithDefault("VERSIONAPP_NAMESPACE", "default")
 
 	// Validate namespace
 	if err := validateNamespace(namespace); err != nil {
-		format := r.URL.Query().Get("format")
-		if format == "html" {
-			ws.renderHTML(w, &HTMLTemplateData{
-				Namespace: namespace,
-				Error:     "Invalid namespace: " + err.Error(),
-			})
-		} else {
-			http.Error(w, "Invalid namespace: "+err.Error(), http.StatusBadRequest)
-		}
+		http.Error(w, "Invalid namespace: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -413,7 +219,7 @@ func (ws *WebServer) handleRoot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate format parameter
-	validFormats := map[string]bool{"json": true, "yaml": true, "html": true}
+	validFormats := map[string]bool{"json": true, "yaml": true}
 	if !validFormats[format] {
 		http.Error(w, "Invalid format parameter", http.StatusBadRequest)
 		return
@@ -423,14 +229,7 @@ func (ws *WebServer) handleRoot(w http.ResponseWriter, r *http.Request) {
 	versions, err := ws.getDeploymentVersions(namespace)
 	if err != nil {
 		log.Printf("Error getting deployment versions for namespace %s: %v", namespace, err)
-		if format == "html" {
-			ws.renderHTML(w, &HTMLTemplateData{
-				Namespace: namespace,
-				Error:     "Unable to retrieve deployment information",
-			})
-		} else {
-			http.Error(w, internalServerError, http.StatusInternalServerError)
-		}
+		http.Error(w, internalServerError, http.StatusInternalServerError)
 		return
 	}
 
@@ -440,10 +239,7 @@ func (ws *WebServer) handleRoot(w http.ResponseWriter, r *http.Request) {
 	case "yaml":
 		ws.renderYAML(w, versions)
 	default:
-		ws.renderHTML(w, &HTMLTemplateData{
-			Namespace:   versions.Namespace,
-			Deployments: versions.Deployments,
-		})
+		ws.renderJSON(w, versions) // Default to JSON
 	}
 }
 
@@ -474,21 +270,6 @@ func (ws *WebServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Health check JSON encoding error: %v", err)
 		http.Error(w, internalServerError, http.StatusInternalServerError)
 		return
-	}
-}
-
-func (ws *WebServer) renderHTML(w http.ResponseWriter, data *HTMLTemplateData) {
-	tmpl, err := template.New("index").Parse(htmlTemplate)
-	if err != nil {
-		log.Printf("Template parsing error: %v", err)
-		http.Error(w, internalServerError, http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set(headerContentType, contentTypeHTML)
-	if err := tmpl.Execute(w, data); err != nil {
-		log.Printf("Template execution error: %v", err)
-		// Can't send error response after headers are written, just log it
 	}
 }
 
