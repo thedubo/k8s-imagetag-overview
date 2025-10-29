@@ -3,18 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
-	"sync"
-	"time"
 
-	"gopkg.in/yaml.v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -24,38 +19,24 @@ import (
 
 // DeploymentVersion represents the version information for a single deployment
 type DeploymentVersion struct {
-	Images map[string]string `json:"images" yaml:"images"`
+	Images map[string]string `json:"images"`
 }
 
 // NamespaceVersions represents all deployments and their versions in a namespace
 type NamespaceVersions struct {
-	Namespace   string                       `json:"namespace" yaml:"namespace"`
-	Deployments map[string]DeploymentVersion `json:",inline" yaml:",inline"`
+	Deployments map[string]DeploymentVersion `json:",inline"`
 }
 
 // WebServer holds the web server configuration
 type WebServer struct {
-	clientset   *kubernetes.Clientset
-	port        string
-	rateLimiter *RateLimiter
+	clientset *kubernetes.Clientset
+	port      string
 }
 
 // HTTP Content-Type constants
 const (
 	contentTypeJSON   = "application/json"
-	contentTypeYAML   = "text/plain"
 	headerContentType = "Content-Type"
-)
-
-// Error messages
-const (
-	internalServerError = "Internal server error"
-)
-
-// Rate limiting constants
-const (
-	maxRequestsPerIP = 60
-	rateLimitWindow  = time.Minute
 )
 
 // getEnvWithDefault returns the value of the environment variable or a default value if not set
@@ -66,104 +47,6 @@ func getEnvWithDefault(key, defaultValue string) string {
 	return defaultValue
 }
 
-// RateLimiter holds rate limiting data
-type RateLimiter struct {
-	requests map[string][]time.Time
-	mutex    sync.RWMutex
-}
-
-// validateNamespace validates Kubernetes namespace naming rules
-func validateNamespace(ns string) error {
-	if len(ns) > 63 || len(ns) == 0 {
-		return errors.New("namespace must be 1-63 characters long")
-	}
-
-	// Kubernetes namespace naming rules: lowercase alphanumeric and hyphens
-	// Must start and end with alphanumeric
-	matched, err := regexp.MatchString("^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", ns)
-	if err != nil {
-		return err
-	}
-	if !matched {
-		return errors.New("namespace must contain only lowercase letters, numbers, and hyphens, and start/end with alphanumeric")
-	}
-
-	// Reserved namespaces
-	reserved := []string{"kube-system", "kube-public", "kube-node-lease"}
-	for _, r := range reserved {
-		if ns == r {
-			return fmt.Errorf("namespace '%s' is reserved", ns)
-		}
-	}
-
-	return nil
-}
-
-// setSecurityHeaders adds security headers to HTTP response
-func setSecurityHeaders(w http.ResponseWriter) {
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("X-XSS-Protection", "1; mode=block")
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'")
-	w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
-}
-
-// NewRateLimiter creates a new rate limiter
-func NewRateLimiter() *RateLimiter {
-	return &RateLimiter{
-		requests: make(map[string][]time.Time),
-	}
-}
-
-// Allow checks if a request from the given IP should be allowed
-func (rl *RateLimiter) Allow(ip string) bool {
-	rl.mutex.Lock()
-	defer rl.mutex.Unlock()
-
-	now := time.Now()
-
-	// Clean up old requests
-	if requests, exists := rl.requests[ip]; exists {
-		var validRequests []time.Time
-		for _, reqTime := range requests {
-			if now.Sub(reqTime) <= rateLimitWindow {
-				validRequests = append(validRequests, reqTime)
-			}
-		}
-		rl.requests[ip] = validRequests
-	}
-
-	// Check if limit exceeded
-	if len(rl.requests[ip]) >= maxRequestsPerIP {
-		return false
-	}
-
-	// Add current request
-	rl.requests[ip] = append(rl.requests[ip], now)
-	return true
-}
-
-// getClientIP extracts the client IP from the request
-func getClientIP(r *http.Request) string {
-	// Check X-Forwarded-For header first
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		ips := strings.Split(xff, ",")
-		return strings.TrimSpace(ips[0])
-	}
-
-	// Check X-Real-IP header
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return strings.TrimSpace(xri)
-	}
-
-	// Fall back to RemoteAddr
-	ip := r.RemoteAddr
-	if idx := strings.LastIndex(ip, ":"); idx != -1 {
-		ip = ip[:idx]
-	}
-	return ip
-}
-
 func main() {
 	// Create Kubernetes client
 	clientset, err := createKubernetesClient("")
@@ -172,14 +55,12 @@ func main() {
 	}
 
 	server := &WebServer{
-		clientset:   clientset,
-		port:        getEnvWithDefault("VERSIONAPP_PORT", "3304"),
-		rateLimiter: NewRateLimiter(),
+		clientset: clientset,
+		port:      getEnvWithDefault("VERSIONAPP_PORT", "3304"),
 	}
 
 	// Set up HTTP routes
 	http.HandleFunc("/", server.handleRoot)
-	http.HandleFunc("/health", server.handleHealth)
 
 	defaultNamespace := getEnvWithDefault("VERSIONAPP_NAMESPACE", "default")
 	log.Printf("Starting Kubernetes Version Monitor web server on port %s", server.port)
@@ -195,130 +76,51 @@ func (ws *WebServer) handleRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set security headers
-	setSecurityHeaders(w)
-
-	// Rate limiting
-	clientIP := getClientIP(r)
-	if !ws.rateLimiter.Allow(clientIP) {
-		http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
-		return
-	}
-
 	namespace := getEnvWithDefault("VERSIONAPP_NAMESPACE", "default")
-
-	// Validate namespace
-	if err := validateNamespace(namespace); err != nil {
-		http.Error(w, "Invalid namespace: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	format := r.URL.Query().Get("format")
-	if format == "" {
-		format = "json"
-	}
-
-	// Validate format parameter
-	validFormats := map[string]bool{"json": true, "yaml": true}
-	if !validFormats[format] {
-		http.Error(w, "Invalid format parameter", http.StatusBadRequest)
-		return
-	}
 
 	// Get deployment versions
 	versions, err := ws.getDeploymentVersions(namespace)
 	if err != nil {
 		log.Printf("Error getting deployment versions for namespace %s: %v", namespace, err)
-		http.Error(w, internalServerError, http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	switch format {
-	case "json":
-		ws.renderJSON(w, versions)
-	case "yaml":
-		ws.renderYAML(w, versions)
-	default:
-		ws.renderJSON(w, versions) // Default to JSON
-	}
-}
-
-func (ws *WebServer) handleHealth(w http.ResponseWriter, r *http.Request) {
-	// Only allow GET requests
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Set security headers
-	setSecurityHeaders(w)
-
-	// Rate limiting
-	clientIP := getClientIP(r)
-	if !ws.rateLimiter.Allow(clientIP) {
-		http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
-		return
-	}
-
-	response := map[string]string{
-		"status":  "healthy",
-		"service": "kubernetes-version-monitor",
-	}
-
-	w.Header().Set(headerContentType, contentTypeJSON)
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		log.Printf("Health check JSON encoding error: %v", err)
-		http.Error(w, internalServerError, http.StatusInternalServerError)
-		return
-	}
+	ws.renderJSON(w, versions)
 }
 
 func (ws *WebServer) renderJSON(w http.ResponseWriter, versions *NamespaceVersions) {
-	// Create simplified output structure
-	output := make(map[string]interface{})
-	output["namespace"] = versions.Namespace
+    // Create simplified output structure
+    deployments := make([]map[string]interface{}, 0)
+    for deploymentName, deploymentInfo := range versions.Deployments {
+        applications := make([]map[string]string, 0)
+        for applicationName, applicationVersion := range deploymentInfo.Images {
+            applications = append(applications, map[string]string{
+                "name":    applicationName,
+                "version": applicationVersion,
+            })
+        }
+        deployments = append(deployments, map[string]interface{}{
+            "deployment": deploymentName,
+            "applications":     applications,
+        })
+    }
 
-	for deploymentName, deploymentInfo := range versions.Deployments {
-		output[deploymentName] = map[string]interface{}{
-			"images": deploymentInfo.Images,
-		}
-	}
+    output := map[string]interface{}{
+        "deployments": deployments,
+    }
 
 	// Marshal JSON first to catch errors before writing headers
 	jsonData, err := json.Marshal(output)
 	if err != nil {
 		log.Printf("JSON encoding error: %v", err)
-		http.Error(w, internalServerError, http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set(headerContentType, contentTypeJSON)
 	if _, err := w.Write(jsonData); err != nil {
 		log.Printf("JSON write error: %v", err)
-	}
-}
-
-func (ws *WebServer) renderYAML(w http.ResponseWriter, versions *NamespaceVersions) {
-	// Create simplified output structure
-	output := make(map[string]interface{})
-	output["namespace"] = versions.Namespace
-
-	for deploymentName, deploymentInfo := range versions.Deployments {
-		output[deploymentName] = map[string]interface{}{
-			"images": deploymentInfo.Images,
-		}
-	}
-
-	yamlData, err := yaml.Marshal(output)
-	if err != nil {
-		log.Printf("YAML encoding error: %v", err)
-		http.Error(w, internalServerError, http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set(headerContentType, contentTypeYAML)
-	if _, err := w.Write(yamlData); err != nil {
-		log.Printf("YAML write error: %v", err)
 	}
 }
 
@@ -380,7 +182,6 @@ func (ws *WebServer) getDeploymentVersions(namespace string) (*NamespaceVersions
 	}
 
 	versions := &NamespaceVersions{
-		Namespace:   namespace,
 		Deployments: make(map[string]DeploymentVersion),
 	}
 
