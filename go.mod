@@ -3,11 +3,12 @@ module version-overview
 go 1.25.3
 
 require (
-	k8s.io/apimachinery v0.34.2
+	k8s.io/apimachinery v0.35.0
 	k8s.io/client-go v0.34.2
 )
 
 require (
+	github.com/Masterminds/semver/v3 v3.4.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/emicklei/go-restful/v3 v3.13.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
